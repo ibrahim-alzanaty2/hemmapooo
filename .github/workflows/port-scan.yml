@@ -1,0 +1,105 @@
+name: 'Nmap Port Scanner & Discord Notifier'
+
+on:
+  # 1. Schedule: Runs every 6 hours at minute 0 (e.g., 00:00, 06:00, 12:00, 18:00 UTC)
+  schedule:
+    - cron: '0 */6 * * *'
+
+  # 2. Manual Trigger: Allows you to run the scan manually and choose the port range
+  workflow_dispatch:
+    inputs:
+      port_range:
+        description: 'Select the port range to scan'
+        required: true
+        default: '1-1000'
+        type: choice
+        options:
+          - '1-1000' # Fast scan (default for scheduled runs)
+          - '1-65535' # Full scan
+
+env:
+  TARGETS_FILE: 'targets.txt'
+  RESULTS_FILE: 'scan_results.gnmap' # Using greppable format for easy parsing
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read' # To checkout code
+      actions: 'read'  # To download previous artifacts
+      # No special permissions needed for sending a webhook
+
+    steps:
+      - name: '1: Checkout Repository'
+        uses: actions/checkout@v4
+
+      - name: '2: Determine Port Range'
+        id: set_port_range
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "Scheduled run: Using default port range 1-1000"
+            echo "FINAL_PORT_RANGE=1-1000" >> $GITHUB_ENV
+          else
+            echo "Manual run: Using selected port range ${{ github.event.inputs.port_range }}"
+            echo "FINAL_PORT_RANGE=${{ github.event.inputs.port_range }}" >> $GITHUB_ENV
+          fi
+
+      - name: '3: Download Previous Scan Results'
+        uses: actions/download-artifact@v4
+        with:
+          name: previous-scan-results
+          path: ./previous_results/
+        continue-on-error: true # Important: Don't fail on the very first run
+
+      - name: '4: Run Nmap Scan'
+        run: |
+          echo "Scanning targets from ${{ env.TARGETS_FILE }} on ports ${{ env.FINAL_PORT_RANGE }}..."
+          # -iL: Input from list of targets
+          # -p: Port range
+          # -oG: Output in greppable format
+          # -T4: Aggressive timing template
+          nmap -iL ${{ env.TARGETS_FILE }} -p ${{ env.FINAL_PORT_RANGE }} -oG ${{ env.RESULTS_FILE }} -T4
+
+      - name: '5: Compare Results and Notify Discord'
+        run: |
+          # Define files for comparison
+          CURRENT_RESULTS="${{ env.RESULTS_FILE }}"
+          PREVIOUS_RESULTS="./previous_results/${{ env.RESULTS_FILE }}"
+          NEW_PORTS_FILE="new_open_ports.txt"
+
+          # Check if a previous scan result exists
+          if [ -f "$PREVIOUS_RESULTS" ]; then
+            echo "Previous scan found. Comparing results..."
+            
+            # Use 'diff' to find lines that are only in the current file.
+            # This cleverly shows new open ports that weren't open before.
+            diff --changed-group-format='%>' --unchanged-group-format='' "$PREVIOUS_RESULTS" "$CURRENT_RESULTS" > "$NEW_PORTS_FILE"
+
+            if [ -s "$NEW_PORTS_FILE" ]; then
+              echo "New open ports detected! Preparing Discord notification."
+              
+              # Format the output for a nice Discord message
+              # The gnmap format is: Host: IP () Ports: port/state/protocol//...
+              DISCORD_MESSAGE=$(awk '{print "Host: " $2 " | New Open Port: " $5}' "$NEW_PORTS_FILE" | sed 's/\// /g' | awk '{print $1 " " $2 " " $NF}' | sed 's/,//g')
+              
+              # Send the notification to Discord
+              curl -X POST -H "Content-Type: application/json" \
+                --data "{\"embeds\": [{\"title\": \"🚨 New Open Ports Detected!\", \"description\": \"Changes detected since the last scan:\n\`\`\`\n${DISCORD_MESSAGE}\n\`\`\`\", \"color\": 16711680, \"footer\": {\"text\": \"Scan ran on ports ${{ env.FINAL_PORT_RANGE }}\"}}]}" \
+                "${{ secrets.DISCORD_WEBHOOK_URL1 }}"
+            else
+              echo "No new open ports detected."
+            fi
+          else
+            echo "No previous scan found. This is the first run."
+            # Optional: Send a notification on the first successful run
+            curl -X POST -H "Content-Type: application/json" \
+              --data "{\"embeds\": [{\"title\": \"✅ Initial Nmap Scan Complete\", \"description\": \"First scan on ports ${{ env.FINAL_PORT_RANGE }} has finished. Future runs will be compared against this baseline.\", \"color\": 65280}]}" \
+              "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          fi
+
+      - name: '6: Upload Scan Results as Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: previous-scan-results
+          path: ${{ env.RESULTS_FILE }}
+          retention-days: 30 # Keep results for 30 days
