@@ -94,7 +94,7 @@ jobs:
             # Optional: Send a notification on the first successful run
             curl -X POST -H "Content-Type: application/json" \
               --data "{\"embeds\": [{\"title\": \"✅ Initial Nmap Scan Complete\", \"description\": \"First scan on ports ${{ env.FINAL_PORT_RANGE }} has finished. Future runs will be compared against this baseline.\", \"color\": 65280}]}" \
-              "${{ secrets.DISCORD_WEBHOOK_URL }}"
+              "${{ secrets.DISCORD_WEBHOOK_URL1 }}"
           fi
 
       - name: '6: Upload Scan Results as Artifact'
